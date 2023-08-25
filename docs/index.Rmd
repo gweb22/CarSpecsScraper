@@ -1,0 +1,209 @@
+---
+title: "Preiss Co. -- The Warehouse: Parking Arrangement"
+author: "Gibson Weber"
+date: "2023-06-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Desktop/Miscellaneous/DS Projects/Parking_WH")
+library(readr)
+library(tidyr)
+library(dplyr)
+library(car)
+library(ggplot2)
+library(rlang)
+library(caret)
+library(class)
+library(kableExtra)
+library(corrplot)
+library(reshape2)
+library(tibble)
+library(rvest)
+library(stringr)
+library(httr)
+library(writexl)
+library(purrr)
+```
+
+### Initializing Data
+```{r}
+whpark <- read.csv("WH_Fall_2023_Parking.csv", stringsAsFactors = T)
+```
+
+### Data Cleaning
+```{r warning=FALSE}
+whpark <- whpark %>%
+  mutate(Make.Model = str_replace_all(Make.Model, c("Mercedes Benz" = "Mercedes-Benz",
+                                                    "Land Rover" = "Land-Rover",
+                                                    "Chevy" = "Chevrolet",
+                                                    "Honda CRV" = "Honda CR-V"))) %>%
+  mutate(Make.Model = str_replace(Make.Model, "^(\\d{4})\\s(.+)$", "\\2 \\1")) %>%
+  separate('Make.Model', into = c("Make", "Model"), sep = " ", remove = T, extra = "merge") %>%
+  separate(Model, into = c("Model", "Year"), sep = " (?=\\b\\d{4}\\b)", extra = "merge", fill = "right") %>%
+  mutate(Model = ifelse(!is.na(Year) & as.integer(Year) < 1950, paste0(Model, "-", Year), Model),
+         Year = ifelse(!is.na(Year) & as.integer(Year) < 1950, NA, Year)) %>%
+  mutate(Model = str_trim(Model)) %>%
+  mutate(
+    Make = str_replace_all(Make, c(" " = "_", "-" = "_")),
+    Model = str_replace_all(Model, c(" " = "_", "-" = "_"))) %>%
+  rename("Spot.Type" = X,
+         "Spot.Number" = Spot..) %>%
+  mutate(TINY = grepl("TINY$", Spot.Type),
+         Spot.Type = str_remove(Spot.Type, "TINY")) %>%
+  select(-Decal..) %>%
+  select(Spot.Type, TINY, everything()) %>%
+  filter(!is.na(Make) & !is.na(Model))
+```
+
+### Data Scraping
+```{r}
+#FINAL YearLookUP FUNCTION
+YearLookUP <- function(make, model) {
+  base_url <- "https://www.cars.com/research/"
+  car_link <- paste0(base_url, tolower((make)), "-", tolower((model)))
+
+  # Fetching available model years
+  years <- GET(car_link, user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36")) %>%
+    read_html() %>%
+    html_nodes(".js-jump-nav-item") %>%
+    html_text() %>%
+    str_extract("[0-9]{4}")
+  
+  return(years)
+}
+
+
+#FINAL SpecLookUP FUNCTION
+SpecLookUP <- function(make, model, year) {
+  base_url <- "https://www.cars.com/research/"
+  car_link <- paste0(base_url, tolower((make)), "-", tolower((model)))
+  
+  if (!is.na(year)) {
+    car_link <- paste0(car_link, "-", year, "/specs")
+  } else {
+    max_year <- YearLookUP(make, model)[1]
+    car_link <- paste0(car_link, "-", max_year, "/specs")
+  }
+  
+  #Dims Tbl
+  car_dims <- GET(car_link, user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36")) %>%
+    read_html() %>%
+    html_node("#specifications-panel14 > table:nth-child(1)") %>%
+    html_table() %>%
+    as.data.frame() %>%
+    filter(X1 == "Length, Overall" |
+           X1 == "Width, Max w/o mirrors" |
+           X1 == "Height, Overall")
+
+  #Backups
+  if (nrow(car_dims) == 0) {
+    # Available CSS selectors
+    css_selectors <- paste0("#specifications-panel", 10:20, " > table:nth-child(1)")
+  
+    # Initialize dimensions table
+    car_dims <- NULL
+    
+    # Try different CSS selectors until correct one is found
+    for (selector in css_selectors) {
+        # Attempt to fetch dimensions table
+        car_dims <- GET(car_link, user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36")) %>%
+          read_html() %>%
+          html_node(selector) %>%
+          html_table() %>%
+          as.data.frame() %>%
+          filter(X1 == "Length, Overall" |
+                 X1 == "Width, Max w/o mirrors" |
+                 X1 == "Height, Overall")
+        
+        # Break the loop if dimensions table is successfully fetched
+        if (nrow(car_dims) != 0){
+          break
+        }
+      }
+    }
+  car_dims <- car_dims %>%
+    pivot_wider(names_from = X1, values_from = X2) %>%
+    rename_with(~ str_split(.x, ",", simplify = TRUE)[, 1]) %>%
+    select(Length, Width, Height) %>%
+    as.character()
+  
+  #Backup Dims / NA Dims Catcher  
+  if (any(grepl("NA|N/A", car_dims))) {
+    base_link <- "https://www.google.com/search?q="
+    car_link <- paste0(base_link, tolower((make)), "+", tolower((model)))
+  
+    if (!is.null(year) && !is.na(year)) {
+      car_link <- paste0(car_link, "+", year)
+    }
+  
+    car_link <- paste0(car_link, "+dimensions")
+  
+    car_dims <- read_html(car_link) %>%
+      html_nodes("div.BNeawe") %>%
+      html_text() %>%
+      grep("L x", ., value = TRUE) %>%
+      first()
+  }
+  
+  return(car_dims)
+}
+```
+
+
+### Applying Functions to Data
+```{r}
+whparkC1 <- whpark %>%
+  mutate(Dimensions = pmap(list(Make, Model, Year), function(make, model, year) {
+    tryCatch(
+      SpecLookUP(make, model, year),
+      error = function(e) {
+        message("Error occurred for row:", make, "-", model, "-", year)
+        NA
+      }
+    )
+  }))
+```
+
+
+### Cleaning and Subsetting
+```{r warning=FALSE}
+#Cleaning
+whparkC2 <- whparkC1 %>%
+  mutate(Dimensions = ifelse(grepl("\\sx\\s", Dimensions),
+                             str_replace_all(Dimensions, c("L" = "", "W" = "", "H" = "", " x " = ", ")),
+                             str_replace_all(Dimensions, c("c\\(" = "", "\\)" = "", "\\\"" = "", " in" = "\\\"")))) %>%
+  separate(Dimensions, into = c("Length", "Width", "Height"), sep = ", ", convert = TRUE) %>%
+  mutate(across(c(Length, Width, Height), str_remove, pattern = "^[LWH]\\s")) %>%
+  mutate(Spot.Type = str_trim(Spot.Type)) %>%
+  arrange(Spot.Type, Width)
+
+###Subset by Spot
+#Uncovered Single
+whparkUCS <- whparkC2 %>%
+  subset(Spot.Type == "Uncovered Single/ $140")
+
+#Covered Single
+whparkCS <- whparkC2 %>%
+  subset(Spot.Type == "Covered Single/ $150")
+
+#Uncovered Tandem
+whparkUCT <- whparkC2 %>%
+  subset(Spot.Type == "Uncovered Tandem/ $115")
+
+#Covered Tandem
+whparkCT <- whparkC2 %>%
+  subset(Spot.Type == "Covered Tandem/ $125")
+```
+
+### Exporting Files
+```{r}
+library(writexl)
+
+# Export to Excel
+write_xlsx(whparkC2, path = "whparkC2_data.xlsx")
+```
+
+
+
