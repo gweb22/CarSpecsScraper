@@ -1,6 +1,3 @@
-# HTML Link
-https://gweb22.github.io/CarSpecs_WebScraper/
-
 # Project Overview
 ### Purpose
 This project's main goal is to optimize parking space assignments for vehicles at The Warehouse Apartments parking lot and parking garage by providing management with a detailed report of each vehichle's dimmensional specifications. 
